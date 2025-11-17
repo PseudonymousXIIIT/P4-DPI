@@ -5,7 +5,7 @@ services:
     build: .
     container_name: p4-dpi-container
     privileged: true
-    network_mode: host
+    # network_mode: host
     volumes:
       - ./logs:/p4-dpi/logs
       - ./p4_programs:/p4-dpi/p4_programs

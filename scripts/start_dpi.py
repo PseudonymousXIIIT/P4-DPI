@@ -435,8 +435,7 @@ class DPISystem:
                 print(f"DEBUG: start_system returned True, running={self.running}", flush=True)
                 # Keep running until interrupted
                 while self.running:
-                    time.sleep(360)
-                    break
+                    pass
 
                 print(f"DEBUG: exited run loop, running={self.running}", flush=True)
             else:
