@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  p4-dpi:
+    build: .
+    container_name: p4-dpi-container
+    privileged: true
+    network_mode: host
+    volumes:
+      - ./logs:/p4-dpi/logs
+      - ./p4_programs:/p4-dpi/p4_programs
+      - ./scripts:/p4-dpi/scripts
+      - ./config:/p4-dpi/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - P4C=/usr/local/bin/p4c
+      - BMV2=/usr/local
+      - PYTHONPATH=/usr/local/lib/python3.8/site-packages:$PYTHONPATH
+    ports:
+      - "5000:5000"  # Web interface
+      - "8080:8080"  # Mininet
+      - "9090:9090"  # P4Runtime
+    stdin_open: true
+    tty: true
+    command: /bin/bash

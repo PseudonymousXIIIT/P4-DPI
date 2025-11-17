@@ -1,0 +1,64 @@
+# Logging Configuration for P4 DPI Tool
+
+database:
+  enabled: true
+  file: logs/packets.db
+  max_connections: 10
+  timeout: 30
+
+export:
+  enabled: true
+  formats:
+    - json
+    - csv
+    - pcap
+  interval: 300  # 5 minutes
+  compression: true
+  encryption: false
+  max_file_size: 104857600  # 100MB
+
+analysis:
+  enabled: true
+  flow_analysis: true
+  anomaly_detection: true
+  statistics_interval: 60  # seconds
+  real_time_alerts: true
+
+retention:
+  max_packets: 100000
+  max_age_days: 7
+  cleanup_interval: 3600  # 1 hour
+  archive_old_data: true
+
+alerts:
+  enabled: true
+  channels:
+    - file
+    - email
+    - webhook
+  
+  thresholds:
+    suspicious_packets: 10
+    port_scan_attempts: 5
+    ddos_attack: 100
+    malformed_packets: 50
+  
+  email:
+    smtp_server: localhost
+    smtp_port: 587
+    username: ""
+    password: ""
+    from_address: "dpi@localhost"
+    to_addresses:
+      - "admin@localhost"
+  
+  webhook:
+    url: "http://localhost:5000/webhook"
+    timeout: 10
+
+logging:
+  level: INFO
+  file: logs/packet_logger.log
+  max_size: 10485760  # 10MB
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"

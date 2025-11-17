@@ -1,0 +1,159 @@
+# P4 DPI Configuration File
+# Main configuration for the Deep Packet Inspection system
+
+switches:
+  - name: s1
+    device_id: 1
+    grpc_port: 50051
+    cpu_port: 255
+    p4info_file: p4_programs/dpi_l2_l4.p4info.txt
+    runtime_json_file: p4_programs/dpi_l2_l4.json
+  - name: s2
+    device_id: 2
+    grpc_port: 50052
+    cpu_port: 255
+    p4info_file: p4_programs/dpi_l2_l4.p4info.txt
+    runtime_json_file: p4_programs/dpi_l2_l4.json
+  - name: s3
+    device_id: 3
+    grpc_port: 50053
+    cpu_port: 255
+    p4info_file: p4_programs/dpi_l2_l4.p4info.txt
+    runtime_json_file: p4_programs/dpi_l2_l4.json
+
+logging:
+  level: INFO
+  file: logs/dpi.log
+  max_size: 10485760  # 10MB
+  backup_count: 5
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+monitoring:
+  enable_real_time: true
+  log_interval: 1  # seconds
+  stats_interval: 10  # seconds
+  packet_capture: true
+  flow_analysis: true
+  anomaly_detection: true
+
+network:
+  topology:
+    type: mininet
+    switches: 3
+    hosts: 6
+    links: 7
+  
+  subnets:
+    - name: client_network
+      subnet: 10.0.1.0/24
+      gateway: 10.0.1.254
+    - name: server_network
+      subnet: 10.0.2.0/24
+      gateway: 10.0.2.254
+    - name: attacker_network
+      subnet: 10.0.3.0/24
+      gateway: 10.0.3.254
+    - name: monitoring_network
+      subnet: 10.0.4.0/24
+      gateway: 10.0.4.254
+
+protocols:
+  layer2:
+    - name: Ethernet
+      enabled: true
+      analysis: true
+  
+  layer3:
+    - name: IPv4
+      enabled: true
+      analysis: true
+    - name: IPv6
+      enabled: true
+      analysis: true
+    - name: ARP
+      enabled: true
+      analysis: true
+  
+  layer4:
+    - name: TCP
+      enabled: true
+      analysis: true
+      flags_analysis: true
+    - name: UDP
+      enabled: true
+      analysis: true
+    - name: ICMP
+      enabled: true
+      analysis: true
+      type_analysis: true
+
+security:
+  suspicious_detection:
+    port_scanning:
+      enabled: true
+      threshold: 10  # ports per minute
+      action: log
+    
+    ddos_detection:
+      enabled: true
+      threshold: 100  # packets per second
+      action: log
+    
+    unusual_protocols:
+      enabled: true
+      action: log
+  
+  filtering:
+    blacklist_ips:
+      - 192.168.1.100
+      - 10.0.0.100
+    
+    whitelist_ips:
+      - 10.0.1.0/24
+      - 10.0.2.0/24
+    
+    blocked_ports:
+      - 23  # Telnet
+      - 135  # RPC
+      - 139  # NetBIOS
+      - 445  # SMB
+
+performance:
+  packet_processing:
+    max_packets_per_second: 10000
+    buffer_size: 1000
+    timeout: 5  # seconds
+  
+  memory:
+    max_packets_in_memory: 100000
+    cleanup_interval: 300  # seconds
+  
+  database:
+    enabled: true
+    file: logs/packets.db
+    max_size: 1073741824  # 1GB
+    backup_interval: 3600  # 1 hour
+
+export:
+  formats:
+    - json
+    - csv
+    - pcap
+  
+  interval: 300  # 5 minutes
+  compression: true
+  encryption: false
+
+web_interface:
+  enabled: false
+  host: 0.0.0.0
+  port: 5000
+  debug: false
+  authentication: false
+
+api:
+  enabled: true
+  host: 0.0.0.0
+  port: 8080
+  rate_limit: 100  # requests per minute
+  authentication: false

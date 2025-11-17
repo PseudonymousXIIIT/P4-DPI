@@ -1,0 +1,218 @@
+# Traffic Generation Configuration for P4 DPI Tool
+
+# Source and destination IPs for traffic generation
+src_ips:
+  - 10.0.1.1
+  - 10.0.1.2
+  - 10.0.3.1
+  - 192.168.1.10
+  - 192.168.1.11
+
+dst_ips:
+  - 10.0.2.1
+  - 10.0.2.2
+  - 10.0.4.1
+  - 8.8.8.8
+  - 1.1.1.1
+
+# Port ranges for traffic generation
+src_ports: 1024-65535
+dst_ports:
+  - 80    # HTTP
+  - 443   # HTTPS
+  - 22    # SSH
+  - 53    # DNS
+  - 21    # FTP
+  - 25    # SMTP
+  - 110   # POP3
+  - 143   # IMAP
+  - 993   # IMAPS
+  - 995   # POP3S
+  - 3389  # RDP
+  - 5900  # VNC
+  - 8080  # HTTP Alt
+  - 8443  # HTTPS Alt
+
+# Traffic patterns configuration
+patterns:
+  normal_traffic:
+    enabled: true
+    rate: 10  # packets per second
+    duration: 300  # seconds
+    protocols:
+      - TCP
+      - UDP
+      - ICMP
+    description: "Normal network traffic patterns"
+
+  http_traffic:
+    enabled: true
+    rate: 5
+    duration: 300
+    protocols:
+      - TCP
+    ports:
+      - 80
+      - 443
+      - 8080
+      - 8443
+    description: "HTTP/HTTPS traffic simulation"
+
+  dns_traffic:
+    enabled: true
+    rate: 2
+    duration: 300
+    protocols:
+      - UDP
+    ports:
+      - 53
+    description: "DNS query traffic"
+
+  ping_traffic:
+    enabled: true
+    rate: 1
+    duration: 300
+    protocols:
+      - ICMP
+    description: "ICMP ping traffic"
+
+  ssh_traffic:
+    enabled: true
+    rate: 1
+    duration: 300
+    protocols:
+      - TCP
+    ports:
+      - 22
+    description: "SSH connection traffic"
+
+  ftp_traffic:
+    enabled: true
+    rate: 1
+    duration: 300
+    protocols:
+      - TCP
+    ports:
+      - 21
+      - 20
+    description: "FTP traffic"
+
+  email_traffic:
+    enabled: true
+    rate: 2
+    duration: 300
+    protocols:
+      - TCP
+    ports:
+      - 25
+      - 110
+      - 143
+      - 993
+      - 995
+    description: "Email protocol traffic"
+
+  # Suspicious traffic patterns
+  port_scan:
+    enabled: true
+    rate: 20
+    duration: 60
+    protocols:
+      - TCP
+    description: "Port scanning attack simulation"
+    suspicious: true
+
+  ddos_attack:
+    enabled: true
+    rate: 100
+    duration: 30
+    protocols:
+      - TCP
+      - UDP
+    description: "DDoS attack simulation"
+    suspicious: true
+
+  syn_flood:
+    enabled: true
+    rate: 50
+    duration: 30
+    protocols:
+      - TCP
+    tcp_flags: 2  # SYN flag
+    description: "SYN flood attack simulation"
+    suspicious: true
+
+  udp_flood:
+    enabled: true
+    rate: 80
+    duration: 30
+    protocols:
+      - UDP
+    description: "UDP flood attack simulation"
+    suspicious: true
+
+  icmp_flood:
+    enabled: true
+    rate: 60
+    duration: 30
+    protocols:
+      - ICMP
+    description: "ICMP flood attack simulation"
+    suspicious: true
+
+# Advanced traffic patterns
+advanced_patterns:
+  slowloris:
+    enabled: false
+    rate: 1
+    duration: 120
+    description: "Slowloris attack simulation"
+    suspicious: true
+
+  http_flood:
+    enabled: false
+    rate: 200
+    duration: 60
+    protocols:
+      - TCP
+    ports:
+      - 80
+      - 443
+    description: "HTTP flood attack simulation"
+    suspicious: true
+
+  dns_amplification:
+    enabled: false
+    rate: 10
+    duration: 60
+    protocols:
+      - UDP
+    ports:
+      - 53
+    description: "DNS amplification attack simulation"
+    suspicious: true
+
+# Traffic generation settings
+generation:
+  randomize_sources: true
+  randomize_destinations: true
+  randomize_ports: true
+  packet_size_range:
+    min: 64
+    max: 1500
+  inter_packet_delay:
+    min: 0.001  # 1ms
+    max: 1.0    # 1s
+
+# Network interface settings
+interface:
+  name: eth0
+  promiscuous: true
+  monitor_mode: false
+
+# Logging for traffic generation
+logging:
+  level: INFO
+  file: logs/traffic_generator.log
+  max_size: 10485760  # 10MB
+  backup_count: 3
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
