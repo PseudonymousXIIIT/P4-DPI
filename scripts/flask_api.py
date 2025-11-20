@@ -104,7 +104,7 @@ class PacketDataProvider:
                 SELECT * FROM packets 
                 ORDER BY timestamp DESC 
                 LIMIT ?
-            """, (limit))
+            """, (limit,))
 
             rows = cursor.fetchall()
             conn.close()
