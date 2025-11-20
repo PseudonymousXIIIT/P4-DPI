@@ -131,11 +131,21 @@ class P4Switch(Switch):
         # Start the process
         try:
             with open(f'/tmp/{self.name}_switch.out', 'w') as outfile:
+                # Set LD_LIBRARY_PATH for BMv2 shared libraries
+                env = os.environ.copy()
+                lib_paths = [
+                    '/usr/local/lib',
+                    '/p4-dpi/bmv2/targets/simple_switch_grpc/.libs',
+                    env.get('LD_LIBRARY_PATH', '')
+                ]
+                env['LD_LIBRARY_PATH'] = ':'.join(filter(None, lib_paths))
+                
                 self.cmd_handle = subprocess.Popen(
                     cmd,
                     stdout=outfile,
                     stderr=subprocess.STDOUT,
-                    cwd='/tmp'
+                    cwd='/tmp',
+                    env=env
                 )
             logger.info(f"{self.name} started with PID {self.cmd_handle.pid}")
             
@@ -300,6 +310,16 @@ class DPITopology:
     
     def add_hosts(self):
         """Add hosts to the topology"""
+        # Disable IPv6 at kernel level before creating hosts to prevent Router Solicitation
+        import subprocess
+        try:
+            subprocess.run(['sysctl', '-w', 'net.ipv6.conf.all.disable_ipv6=1'], 
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(['sysctl', '-w', 'net.ipv6.conf.default.disable_ipv6=1'], 
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+        
         # Client hosts
         h1 = self.net.addHost(
             'h1',
@@ -406,6 +426,11 @@ class DPITopology:
             host.cmd('sysctl -w net.ipv6.conf.all.disable_ipv6=1 >/dev/null 2>&1')
             host.cmd('sysctl -w net.ipv6.conf.default.disable_ipv6=1 >/dev/null 2>&1')
             
+            # Also disable IPv6 on each interface of this host
+            for intf in host.intfList():
+                if intf.name and intf.name != 'lo':
+                    host.cmd(f'sysctl -w net.ipv6.conf.{intf.name}.disable_ipv6=1 >/dev/null 2>&1')
+            
             # Set default routes
             if host_name in ['h1', 'h2', 'h5']:
                 # Client hosts route through s2
@@ -453,24 +478,251 @@ echo $! > /tmp/tcpdump.pid
         traffic_thread.start()
     
     def generate_traffic(self):
-        """Generate various types of traffic for testing"""
-        time.sleep(5)  # Wait for network to stabilize
-        
-        # HTTP traffic
-        self.hosts['h1'].cmd('curl -s http://10.0.2.1/ > /dev/null &')
-        self.hosts['h2'].cmd('curl -s http://10.0.2.1/ > /dev/null &')
-        
-        # Ping traffic
-        self.hosts['h1'].cmd('ping -c 5 10.0.2.1 &')
-        self.hosts['h2'].cmd('ping -c 5 10.0.2.2 &')
-        
-        # UDP traffic (DNS simulation)
-        self.hosts['h1'].cmd('nslookup google.com 8.8.8.8 &')
-        
-        # TCP connection test
-        self.hosts['h1'].cmd('nc -z 10.0.2.1 80 &')
-        
-        self.logger.info("Traffic generation started")
+        """Generate various types of traffic for testing using Scapy for reliability"""
+        self.logger.info("Starting continuous traffic generation using Scapy")
+        time.sleep(2)  # Wait for network to stabilize
+
+        # Import Scapy for packet crafting
+        from scapy.all import Ether, IP, IPv6, TCP, UDP, ICMP, ICMPv6EchoRequest, sendp, get_if_list, Raw
+        import random
+
+        # Continuous traffic generation loop using raw packet injection
+        iteration = 0
+        sent = 0  # approximate packets sent counter
+        # Allow simple tuning via environment variables without code changes
+        # Hard-coded, gentle defaults; other env knobs remain for structure/randomness only
+        try:
+            randomize = int(os.getenv('DPI_TRAFFIC_RANDOM', '1')) != 0
+            target_packets = int(os.getenv('DPI_TRAFFIC_TARGET_PACKETS', '0'))  # 0 = unlimited
+        except Exception:
+            randomize = True
+            target_packets = 0
+
+        # Enforce hard-coded rate in 12–16 packets/sec (total)
+        # We send on 1 interface, 1 packet per iteration; sleep chosen per-iteration for 12–16 pps
+        iface_limit = 1
+        per_iter = 1
+        burst = 1
+        RATE_MIN_PPS = 12.0
+        RATE_MAX_PPS = 16.0
+
+        while True:
+            iteration += 1
+            try:
+                # Build dynamic endpoint lists from Mininet hosts when available
+                client_names = ['h1', 'h2', 'h5']
+                server_names = ['h3', 'h4']
+                clients = [self.hosts[n] for n in client_names if n in self.hosts]
+                servers = [self.hosts[n] for n in server_names if n in self.hosts]
+
+                def pick_pair():
+                    if clients and servers and randomize:
+                        a = random.choice(clients)
+                        b = random.choice(servers)
+                        # 50% chance to flip directions to vary traffic
+                        if random.random() < 0.5:
+                            a, b = b, a
+                        return a, b
+                    # Fallback to fixed host mapping if topology not ready
+                    return self.hosts.get('h1'), self.hosts.get('h3')
+
+                def rand_ttl():
+                    return random.randint(32, 128) if randomize else 64
+
+                def rand_tos():
+                    return random.choice([0, 16, 32, 40]) if randomize else 0
+
+                def rand_sport():
+                    return random.randint(1024, 65535) if randomize else 50000 + iteration
+
+                def rand_payload():
+                    size = random.randint(20, 120) if randomize else 20
+                    return os.urandom(size)
+                
+                def create_tls_client_hello():
+                    """Create a minimal TLS ClientHello for testing Layer 5 parsing."""
+                    # TLS Record: Handshake (0x16), TLS 1.2 (0x0303), Length
+                    tls_record = bytes([0x16, 0x03, 0x03, 0x00, 0x70])  # 112 bytes
+                    # Handshake: ClientHello (0x01), Length
+                    handshake = bytes([0x01, 0x00, 0x00, 0x6C])  # 108 bytes
+                    # Version TLS 1.2, Random (32 bytes)
+                    version = bytes([0x03, 0x03])
+                    random_data = os.urandom(32)
+                    # Session ID: 8 bytes
+                    session_id_len = bytes([0x08])
+                    session_id = os.urandom(8)
+                    # Cipher suites: vary cipher suite for diversity
+                    cipher_options = [
+                        bytes([0x00, 0x02, 0x00, 0x2F]),  # TLS_RSA_WITH_AES_128_CBC_SHA
+                        bytes([0x00, 0x02, 0x00, 0x35]),  # TLS_RSA_WITH_AES_256_CBC_SHA
+                        bytes([0x00, 0x02, 0xC0, 0x2F]),  # TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256
+                        bytes([0x00, 0x02, 0xC0, 0x30]),  # TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384
+                        bytes([0x00, 0x02, 0x00, 0x9C]),  # TLS_RSA_WITH_AES_128_GCM_SHA256
+                        bytes([0x00, 0x02, 0x13, 0x01]),  # TLS_AES_128_GCM_SHA256 (TLS 1.3)
+                    ]
+                    cipher = random.choice(cipher_options) if randomize else cipher_options[0]
+                    # Compression: none
+                    compression = bytes([0x01, 0x00])
+                    # Extensions with SNI
+                    ext_len = bytes([0x00, 0x10])
+                    sni_ext = bytes([0x00, 0x00, 0x00, 0x0C, 0x00, 0x0A, 0x00, 0x00, 0x07]) + b'test.io'
+                    payload = (tls_record + handshake + version + random_data + 
+                              session_id_len + session_id + cipher + compression + ext_len + sni_ext)
+                    return payload
+                
+                def create_http2_frame(stream_id=1):
+                    """Create a minimal HTTP/2 HEADERS frame for testing."""
+                    # HTTP/2 frame format:
+                    # 3 bytes: Length (24-bit)
+                    # 1 byte: Type (0x01 = HEADERS)
+                    # 1 byte: Flags (0x04 = END_HEADERS)
+                    # 4 bytes: Stream ID (31-bit, reserved bit = 0)
+                    # Payload: minimal headers
+                    
+                    payload = b'\x82\x86\x84\x41\x0f\x77\x77\x77\x2e\x65\x78\x61\x6d\x70\x6c\x65\x2e\x63\x6f\x6d'  # Compressed headers
+                    length = len(payload)
+                    frame = bytes([
+                        (length >> 16) & 0xFF,
+                        (length >> 8) & 0xFF,
+                        length & 0xFF,
+                        0x01,  # HEADERS frame type
+                        0x04,  # END_HEADERS flag
+                        (stream_id >> 24) & 0xFF,
+                        (stream_id >> 16) & 0xFF,
+                        (stream_id >> 8) & 0xFF,
+                        stream_id & 0xFF
+                    ]) + payload
+                    return frame
+
+                # Assemble a batch of mixed-protocol packets (IPv4 + IPv6)
+                batch = []
+                n = max(1, per_iter)
+                for _ in range(n):
+                    src_host, dst_host = pick_pair()
+                    if not src_host or not dst_host:
+                        # Topology not ready; skip this packet
+                        continue
+                    src_mac = src_host.MAC()
+                    # Keep dest MAC stable to ensure forwarding via switch
+                    dst_mac = '00:aa:00:00:00:01'
+                    
+                    # 70% IPv4, 30% IPv6 mix
+                    use_ipv6 = random.random() < 0.3 if randomize else False
+                    
+                    if use_ipv6:
+                        # Generate IPv6 addresses based on host IPs
+                        # Convert 10.0.x.y to fe80::x:y for link-local
+                        src_ipv4 = src_host.IP()
+                        dst_ipv4 = dst_host.IP()
+                        src_parts = src_ipv4.split('.')
+                        dst_parts = dst_ipv4.split('.')
+                        src_ipv6 = f"fe80::{src_parts[2]}:{src_parts[3]}"
+                        dst_ipv6 = f"fe80::{dst_parts[2]}:{dst_parts[3]}"
+                        
+                        proto = random.choice(['ICMPv6', 'TCP', 'UDP']) if randomize else 'ICMPv6'
+                        
+                        if proto == 'ICMPv6':
+                            # ICMPv6 Echo Request (type=128) or Neighbor Solicitation (type=135)
+                            icmp_type = random.choice([128, 135]) if randomize else 128
+                            pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                  IPv6(src=src_ipv6, dst=dst_ipv6, hlim=rand_ttl()) / \
+                                  ICMPv6EchoRequest(id=random.randint(1000, 60000), seq=iteration)
+                        elif proto == 'TCP':
+                            dport = random.choice([80, 443, 22, 8080]) if randomize else 80
+                            tcp_pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                      IPv6(src=src_ipv6, dst=dst_ipv6, hlim=rand_ttl()) / \
+                                      TCP(sport=rand_sport(), dport=dport, flags='S')
+                            # Add TLS ClientHello for HTTPS (80% chance)
+                            if dport == 443 and randomize and random.random() < 0.8:
+                                tcp_pkt = tcp_pkt / Raw(load=create_tls_client_hello())
+                            # Add HTTP/2 frame for HTTP (20% chance)
+                            elif dport == 80 and randomize and random.random() < 0.2:
+                                stream_id = random.randint(1, 100)
+                                tcp_pkt = tcp_pkt / Raw(load=create_http2_frame(stream_id))
+                            pkt = tcp_pkt
+                        else:  # UDP
+                            dport = random.choice([53, 123, 5000, 25000]) if randomize else 53
+                            pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                  IPv6(src=src_ipv6, dst=dst_ipv6, hlim=rand_ttl()) / \
+                                  UDP(sport=rand_sport(), dport=dport) / Raw(rand_payload())
+                    else:
+                        # IPv4 packets (original logic)
+                        src_ip = src_host.IP()
+                        dst_ip = dst_host.IP()
+                        proto = random.choice(['ICMP', 'TCP', 'UDP']) if randomize else 'ICMP'
+
+                        if proto == 'ICMP':
+                            pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                  IP(src=src_ip, dst=dst_ip, ttl=rand_ttl(), tos=rand_tos()) / \
+                                  ICMP(type=8, code=0, id=random.randint(1000, 60000), seq=iteration)
+                        elif proto == 'TCP':
+                            dport = random.choice([80, 443, 22, 8080]) if randomize else 80
+                            tcp_pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                      IP(src=src_ip, dst=dst_ip, ttl=rand_ttl(), tos=rand_tos()) / \
+                                      TCP(sport=rand_sport(), dport=dport, flags='S')
+                            # Add TLS ClientHello payload for HTTPS traffic (80% chance)
+                            if dport == 443 and randomize and random.random() < 0.8:
+                                tcp_pkt = tcp_pkt / Raw(load=create_tls_client_hello())
+                            # Add HTTP/2 frame for HTTP (20% chance)
+                            elif dport == 80 and randomize and random.random() < 0.2:
+                                stream_id = random.randint(1, 100)
+                                tcp_pkt = tcp_pkt / Raw(load=create_http2_frame(stream_id))
+                            pkt = tcp_pkt
+                        else:  # UDP
+                            dport = random.choice([53, 123, 5000, 25000]) if randomize else 53
+                            pkt = Ether(src=src_mac, dst=dst_mac) / \
+                                  IP(src=src_ip, dst=dst_ip, ttl=rand_ttl(), tos=rand_tos()) / \
+                                  UDP(sport=rand_sport(), dport=dport) / Raw(rand_payload())
+                    batch.append(pkt)
+
+                # Send packets on available switch interfaces
+                # Use multiple available interfaces (s1-eth*, s2-eth*) to expand coverage and throughput
+                ifaces = [iface for iface in get_if_list() if ('s1-eth' in iface or 's2-eth' in iface)]
+                # Filter to currently-present interfaces to avoid OSError(19)
+                present = []
+                for iface in ifaces:
+                    try:
+                        if os.path.exists(f'/sys/class/net/{iface}'):
+                            present.append(iface)
+                    except Exception:
+                        continue
+
+                if present:
+                    # Limit to first few to avoid excessive duplication
+                    target_ifaces = present[:max(1, iface_limit)]
+                    for _ in range(max(1, burst)):
+                        for tif in target_ifaces:
+                            try:
+                                sendp(batch, iface=tif, verbose=0)
+                                sent += len(batch)
+                            except OSError:
+                                # Interface may have disappeared; skip quietly
+                                continue
+
+                # Stop when approximate target reached
+                if target_packets > 0 and sent >= target_packets:
+                    self.logger.info(f"Traffic generation target reached (~{sent} packets). Stopping generator.")
+                    return
+
+            except Exception as e:
+                # Avoid log flooding; surface concise message
+                self.logger.error(f"Error generating traffic: {e!r}")
+
+            # Hard-coded 12–16 pps: choose a random target rate and sleep accordingly
+            try:
+                pps_target = random.uniform(RATE_MIN_PPS, RATE_MAX_PPS)
+            except Exception:
+                pps_target = (RATE_MIN_PPS + RATE_MAX_PPS) / 2.0
+            iter_sleep = max(0.03, per_iter / float(pps_target))
+
+            if iteration % 10 == 0:
+                try:
+                    ifaces_str = ','.join(target_ifaces) if 'target_ifaces' in locals() else 'NONE'
+                except Exception:
+                    ifaces_str = 'NONE'
+                self.logger.info(f"Traffic generation iter {iteration} sent~{sent} target={target_packets} pps~{pps_target:.1f} ifaces={ifaces_str}")
+
+            time.sleep(iter_sleep)
     
     def run_cli(self):
         """Run Mininet CLI"""

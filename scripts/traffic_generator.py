@@ -22,12 +22,14 @@ from scapy.layers.l2 import Ether, ARP
 import yaml
 
 class TrafficGenerator:
-    def __init__(self, config_file: str = "config/traffic_config.yaml"):
+    def __init__(self, config_file: str = "config/traffic_config.yaml", mininet_net=None):
         """Initialize the traffic generator"""
         self.config = self.load_config(config_file)
         self.setup_logging()
         self.running = False
         self.threads = []
+        self.mininet_net = mininet_net
+        self.mininet_lock = threading.Lock()  # Lock for thread-safe Mininet access
         
         # Network configuration
         self.src_ips = self.config.get('src_ips', ['10.0.1.1', '10.0.1.2', '10.0.3.1'])
@@ -153,44 +155,107 @@ class TrafficGenerator:
     
     def generate_normal_traffic(self):
         """Generate normal network traffic"""
-        src_ip = random.choice(self.src_ips)
-        dst_ip = random.choice(self.dst_ips)
-        src_port = random.choice(self.src_ports)
-        dst_port = random.choice(self.dst_ports)
-        protocol = random.choice(['TCP', 'UDP'])
-        
-        if protocol == 'TCP':
-            self.send_tcp_packet(src_ip, dst_ip, src_port, dst_port)
+        if self.mininet_net:
+            # Use Mininet hosts to generate real traffic
+            src_host = random.choice(['h1', 'h2', 'h5'])
+            dst_host = random.choice(['h3', 'h4'])
+            protocol = random.choice(['TCP', 'UDP'])
+            dst_port = random.choice(self.dst_ports)
+            try:
+                with self.mininet_lock:
+                    h_src = self.mininet_net.get(src_host)
+                    h_dst = self.mininet_net.get(dst_host)
+                    if h_src and h_dst:
+                        dst_ip = h_dst.IP()
+                        if protocol == 'TCP':
+                            h_src.cmd(f'timeout 1 nc -zv {dst_ip} {dst_port} > /dev/null 2>&1 &')
+                        else:
+                            h_src.cmd(f'echo "test" | timeout 1 nc -u {dst_ip} {dst_port} > /dev/null 2>&1 &')
+                        self.logger.debug(f"Sent {protocol} traffic from {src_host} to {dst_host}:{dst_port}")
+            except Exception as e:
+                self.logger.error(f"Error in Mininet traffic generation: {e}")
         else:
-            self.send_udp_packet(src_ip, dst_ip, src_port, dst_port)
+            src_ip = random.choice(self.src_ips)
+            dst_ip = random.choice(self.dst_ips)
+            src_port = random.choice(self.src_ports)
+            dst_port = random.choice(self.dst_ports)
+            protocol = random.choice(['TCP', 'UDP'])
+            if protocol == 'TCP':
+                self.send_tcp_packet(src_ip, dst_ip, src_port, dst_port)
+            else:
+                self.send_udp_packet(src_ip, dst_ip, src_port, dst_port)
     
     def generate_http_traffic(self):
         """Generate HTTP traffic"""
-        src_ip = random.choice(self.src_ips)
-        dst_ip = random.choice(self.dst_ips)
-        src_port = random.choice(self.src_ports)
-        
-        # HTTP request
-        self.send_tcp_packet(src_ip, dst_ip, src_port, 80)
-        
-        # HTTPS request
-        self.send_tcp_packet(src_ip, dst_ip, src_port, 443)
+        if self.mininet_net:
+            # Use Mininet hosts to generate real HTTP traffic
+            src_host = random.choice(['h1', 'h2', 'h5'])
+            dst_host = random.choice(['h3', 'h4'])
+            try:
+                with self.mininet_lock:
+                    h_src = self.mininet_net.get(src_host)
+                    h_dst = self.mininet_net.get(dst_host)
+                    if h_src and h_dst:
+                        dst_ip = h_dst.IP()
+                        # Try HTTP connection
+                        h_src.cmd(f'timeout 1 nc -zv {dst_ip} 80 > /dev/null 2>&1 &')
+                        self.logger.debug(f"Sent HTTP traffic from {src_host} to {dst_host}")
+            except Exception as e:
+                self.logger.error(f"Error in Mininet HTTP traffic: {e}")
+        else:
+            src_ip = random.choice(self.src_ips)
+            dst_ip = random.choice(self.dst_ips)
+            src_port = random.choice(self.src_ports)
+            # HTTP request
+            self.send_tcp_packet(src_ip, dst_ip, src_port, 80)
+            # HTTPS request
+            self.send_tcp_packet(src_ip, dst_ip, src_port, 443)
     
     def generate_dns_traffic(self):
         """Generate DNS traffic"""
-        src_ip = random.choice(self.src_ips)
-        dst_ip = random.choice(self.dst_ips)
-        src_port = random.choice(self.src_ports)
-        
-        # DNS query
-        self.send_udp_packet(src_ip, dst_ip, src_port, 53)
+        if self.mininet_net:
+            # Use Mininet hosts to generate real DNS traffic
+            src_host = random.choice(['h1', 'h2', 'h5'])
+            dst_host = random.choice(['h3', 'h4'])
+            try:
+                with self.mininet_lock:
+                    h_src = self.mininet_net.get(src_host)
+                    h_dst = self.mininet_net.get(dst_host)
+                    if h_src and h_dst:
+                        dst_ip = h_dst.IP()
+                        # Send UDP to port 53 using nc
+                        h_src.cmd(f'echo "test" | timeout 1 nc -u {dst_ip} 53 > /dev/null 2>&1 &')
+                        self.logger.debug(f"Sent DNS traffic from {src_host} to {dst_host}")
+            except Exception as e:
+                self.logger.error(f"Error in Mininet DNS traffic: {e}")
+        else:
+            src_ip = random.choice(self.src_ips)
+            dst_ip = random.choice(self.dst_ips)
+            src_port = random.choice(self.src_ports)
+            # DNS query
+            self.send_udp_packet(src_ip, dst_ip, src_port, 53)
     
     def generate_ping_traffic(self):
         """Generate ICMP ping traffic"""
-        src_ip = random.choice(self.src_ips)
-        dst_ip = random.choice(self.dst_ips)
-        
-        self.send_icmp_packet(src_ip, dst_ip)
+        if self.mininet_net:
+            # Use Mininet hosts to generate real traffic
+            hosts = ['h1', 'h2', 'h3', 'h4', 'h5']
+            src_host = random.choice(['h1', 'h2', 'h5'])
+            dst_host = random.choice(['h3', 'h4'])
+            try:
+                with self.mininet_lock:
+                    h_src = self.mininet_net.get(src_host)
+                    h_dst = self.mininet_net.get(dst_host)
+                    if h_src and h_dst:
+                        dst_ip = h_dst.IP()
+                        h_src.cmd(f'ping -c 1 -W 1 {dst_ip} > /dev/null 2>&1 &')
+                        self.logger.debug(f"Sent ping from {src_host} to {dst_host} ({dst_ip})")
+            except Exception as e:
+                self.logger.error(f"Error in Mininet ping: {e}")
+        else:
+            src_ip = random.choice(self.src_ips)
+            dst_ip = random.choice(self.dst_ips)
+            self.send_icmp_packet(src_ip, dst_ip)
     
     def generate_port_scan(self):
         """Generate port scanning traffic (suspicious)"""

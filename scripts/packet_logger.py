@@ -18,10 +18,10 @@ import csv
 import sqlite3
 from dataclasses import dataclass, asdict
 import yaml
-from scapy.all import sniff
+from scapy.all import sniff, Raw
 from scapy.layers.l2 import Ether
 from scapy.layers.inet import IP, TCP, UDP, ICMP
-from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest
+from scapy.layers.inet6 import IPv6, ICMPv6EchoRequest, ICMPv6ND_RS, ICMPv6ND_RA, ICMPv6ND_NS, ICMPv6ND_NA
 
 @dataclass
 class PacketInfo:
@@ -48,6 +48,11 @@ class PacketInfo:
     ttl: int
     tos: int
     flow_id: str
+    session_id: str = ''
+    tls_version: str = ''
+    tls_cipher: str = ''
+    tls_sni: str = ''
+    http2_stream_id: int = 0
 
 class PacketLogger:
     def __init__(self, config_file: str = "config/logging_config.yaml"):
@@ -142,7 +147,33 @@ class PacketLogger:
                 layer4_protocol TEXT,
                 ttl INTEGER,
                 tos INTEGER,
-                flow_id TEXT
+                flow_id TEXT,
+                session_id TEXT,
+                tls_version TEXT,
+                tls_cipher TEXT,
+                tls_sni TEXT,
+                http2_stream_id INTEGER
+            )
+        ''')
+        
+        # Create session_data table for Layer 5 tracking
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS session_data (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT UNIQUE,
+                flow_id TEXT,
+                session_type TEXT,
+                start_time TEXT,
+                end_time TEXT,
+                message_count INTEGER,
+                tls_version TEXT,
+                tls_cipher_suite TEXT,
+                tls_sni TEXT,
+                tls_session_ticket BOOLEAN,
+                http2_settings TEXT,
+                quic_conn_id TEXT,
+                ssh_banner TEXT,
+                sip_call_id TEXT
             )
         ''')
         
@@ -209,7 +240,12 @@ class PacketLogger:
                 layer4_protocol=packet_data.get('layer4_protocol', ''),
                 ttl=packet_data.get('ttl', 0),
                 tos=packet_data.get('tos', 0),
-                flow_id=self.generate_flow_id(packet_data)
+                flow_id=self.generate_flow_id(packet_data),
+                session_id=packet_data.get('session_id', ''),
+                tls_version=packet_data.get('tls_version', ''),
+                tls_cipher=packet_data.get('tls_cipher', ''),
+                tls_sni=packet_data.get('tls_sni', ''),
+                http2_stream_id=packet_data.get('http2_stream_id', 0)
             )
             
             with self.lock:
@@ -367,8 +403,9 @@ class PacketLogger:
                     timestamp, switch_id, src_mac, dst_mac, src_ip, dst_ip,
                     src_port, dst_port, protocol, packet_size, tcp_flags,
                     icmp_type, icmp_code, is_fragment, is_malformed, is_suspicious,
-                    layer2_protocol, layer3_protocol, layer4_protocol, ttl, tos, flow_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    layer2_protocol, layer3_protocol, layer4_protocol, ttl, tos, flow_id,
+                    session_id, tls_version, tls_cipher, tls_sni, http2_stream_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
                 packet_info.timestamp, packet_info.switch_id, packet_info.src_mac,
                 packet_info.dst_mac, packet_info.src_ip, packet_info.dst_ip,
@@ -377,7 +414,9 @@ class PacketLogger:
                 packet_info.icmp_code, packet_info.is_fragment, packet_info.is_malformed,
                 packet_info.is_suspicious, packet_info.layer2_protocol,
                 packet_info.layer3_protocol, packet_info.layer4_protocol,
-                packet_info.ttl, packet_info.tos, packet_info.flow_id
+                packet_info.ttl, packet_info.tos, packet_info.flow_id,
+                packet_info.session_id, packet_info.tls_version, packet_info.tls_cipher,
+                packet_info.tls_sni, packet_info.http2_stream_id
             ))
             
             # Update flows table
@@ -445,10 +484,17 @@ class PacketLogger:
 
     def _sniff_on_interface(self, iface: str):
         """Sniff packets on a given interface and log them via PacketLogger."""
-        try:
-            sniff(iface=iface, prn=self._handle_scapy_packet, store=False)
-        except Exception as e:
-            self.logger.error(f"Sniffer error on {iface}: {e}")
+        attempts = 0
+        while True:
+            try:
+                sniff(iface=iface, prn=self._handle_scapy_packet, store=False)
+            except Exception as e:
+                attempts += 1
+                if attempts <= 3:
+                    self.logger.warning(f"Sniffer error on {iface}: {e}; retrying in 2s")
+                else:
+                    self.logger.debug(f"Sniffer still failing on {iface}: {e}; retry loop continues")
+                time.sleep(2)
 
     def _handle_scapy_packet(self, pkt):
         """Convert a Scapy packet to our packet_data dict and log it."""
@@ -498,8 +544,9 @@ class PacketLogger:
                 ip6 = pkt[IPv6]
                 src_ip = ip6.src
                 dst_ip = ip6.dst
-                # Hop limit is akin to TTL; not stored for now
+                ttl = int(getattr(ip6, 'hlim', 0) or 0)  # IPv6 hop limit
                 layer3_protocol = 'IPv6'
+                
                 if pkt.haslayer(TCP):
                     t = pkt[TCP]
                     protocol = 'TCP'
@@ -513,8 +560,55 @@ class PacketLogger:
                     src_port = int(u.sport)
                     dst_port = int(u.dport)
                 elif pkt.haslayer(ICMPv6EchoRequest):
-                    protocol = 'ICMP'
-                    layer4_protocol = 'ICMP'
+                    protocol = 'ICMPv6'
+                    layer4_protocol = 'ICMPv6'
+                else:
+                    # Check for other ICMPv6 types (Router Solicitation, etc.)
+                    if pkt.haslayer(ICMPv6ND_RS):
+                        protocol = 'ICMPv6-RS'
+                        layer4_protocol = 'ICMPv6'
+                    elif pkt.haslayer(ICMPv6ND_RA):
+                        protocol = 'ICMPv6-RA'
+                        layer4_protocol = 'ICMPv6'
+                    elif pkt.haslayer(ICMPv6ND_NS):
+                        protocol = 'ICMPv6-NS'
+                        layer4_protocol = 'ICMPv6'
+                    elif pkt.haslayer(ICMPv6ND_NA):
+                        protocol = 'ICMPv6-NA'
+                        layer4_protocol = 'ICMPv6'
+
+            # Layer 5 (Session) parsing
+            session_id = ''
+            tls_version = ''
+            tls_sni = ''
+            tls_cipher = ''
+            http2_stream_id = 0
+            
+            # Try to parse TLS for HTTPS traffic (port 443 or TLS handshake pattern)
+            if pkt.haslayer(TCP) and pkt.haslayer(Raw):
+                payload = bytes(pkt[Raw].load)
+                
+                # Check for TLS ClientHello pattern
+                if (dst_port == 443 or src_port == 443 or 
+                    (len(payload) > 0 and payload[0] == 0x16)):
+                    tls_data = self._parse_tls_client_hello(payload)
+                    session_id = tls_data.get('session_id', '')
+                    tls_version = tls_data.get('tls_version', '')
+                    tls_sni = tls_data.get('tls_sni', '')
+                    tls_cipher = tls_data.get('tls_cipher', '')
+                
+                # Try HTTP/2 frame parsing (common on port 80 for h2c or within TLS for h2)
+                # After TLS handshake, HTTP/2 frames follow
+                if dst_port == 80 or src_port == 80:
+                    # Clear-text HTTP/2 (h2c)
+                    http2_stream_id = self._parse_http2_frame(payload)
+                elif (dst_port == 443 or src_port == 443) and not tls_version:
+                    # Might be HTTP/2 over TLS (post-handshake application data)
+                    # Check if payload looks like HTTP/2 frame (after TLS decryption this would work)
+                    # For encrypted traffic, we can't parse HTTP/2 frames without decryption
+                    # But we can detect h2c or check frame patterns in clear-text scenarios
+                    if len(payload) >= 24 and payload[:3] == b'PRI':
+                        http2_stream_id = 0  # Connection preface detected
 
             packet_data = {
                 'switch_id': self._infer_switch_from_iface(pkt.sniffed_on) if hasattr(pkt, 'sniffed_on') else 's1',
@@ -537,6 +631,11 @@ class PacketLogger:
                 'layer4_protocol': layer4_protocol,
                 'ttl': ttl,
                 'tos': tos,
+                'session_id': session_id,
+                'tls_version': tls_version,
+                'tls_sni': tls_sni,
+                'tls_cipher': tls_cipher,
+                'http2_stream_id': http2_stream_id,
             }
             # Only log if we have at least L3 info
             if protocol or layer3_protocol:
@@ -550,6 +649,142 @@ class PacketLogger:
         # Example: s1-eth2 -> s1
         parts = iface.split('-')
         return parts[0] if parts else 's1'
+    
+    def _parse_tls_client_hello(self, payload: bytes) -> Dict[str, str]:
+        """Parse TLS ClientHello to extract session information (Layer 5)."""
+        tls_data = {
+            'session_id': '',
+            'tls_version': '',
+            'tls_sni': '',
+            'tls_cipher': ''
+        }
+        
+        try:
+            # Check if it looks like a TLS handshake (0x16 = Handshake, 0x03 = SSL 3.0+)
+            if len(payload) < 6 or payload[0] != 0x16:
+                return tls_data
+            
+            # TLS version (bytes 1-2: major.minor)
+            tls_major = payload[1]
+            tls_minor = payload[2]
+            if tls_major == 0x03:
+                if tls_minor == 0x01:
+                    tls_data['tls_version'] = 'TLS 1.0'
+                elif tls_minor == 0x02:
+                    tls_data['tls_version'] = 'TLS 1.1'
+                elif tls_minor == 0x03:
+                    tls_data['tls_version'] = 'TLS 1.2'
+                elif tls_minor == 0x04:
+                    tls_data['tls_version'] = 'TLS 1.3'
+            
+            # Handshake type (byte 5: 0x01 = ClientHello)
+            if len(payload) < 44 or payload[5] != 0x01:
+                return tls_data
+            
+            # Session ID length at offset 43
+            session_id_len = payload[43] if len(payload) > 43 else 0
+            offset = 44 + session_id_len
+            
+            if session_id_len > 0 and len(payload) > 44:
+                # Extract session ID (first 8 bytes as hex for brevity)
+                sess_bytes = payload[44:44+min(session_id_len, 8)]
+                tls_data['session_id'] = sess_bytes.hex()
+            
+            # Extract cipher suites
+            if len(payload) > offset + 2:
+                cipher_suite_len = int.from_bytes(payload[offset:offset+2], 'big')
+                cipher_offset = offset + 2
+                
+                # Extract first cipher suite (2 bytes) as hex
+                if cipher_suite_len >= 2 and len(payload) >= cipher_offset + 2:
+                    cipher_bytes = payload[cipher_offset:cipher_offset+2]
+                    cipher_hex = cipher_bytes.hex().upper()
+                    # Map common cipher suites
+                    cipher_map = {
+                        '002F': 'TLS_RSA_WITH_AES_128_CBC_SHA',
+                        '0035': 'TLS_RSA_WITH_AES_256_CBC_SHA',
+                        'C02F': 'TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256',
+                        'C030': 'TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384',
+                        '009C': 'TLS_RSA_WITH_AES_128_GCM_SHA256',
+                        '009D': 'TLS_RSA_WITH_AES_256_GCM_SHA384',
+                        'C013': 'TLS_ECDHE_RSA_WITH_AES_128_CBC_SHA',
+                        'C014': 'TLS_ECDHE_RSA_WITH_AES_256_CBC_SHA',
+                        '1301': 'TLS_AES_128_GCM_SHA256',
+                        '1302': 'TLS_AES_256_GCM_SHA384',
+                        '1303': 'TLS_CHACHA20_POLY1305_SHA256'
+                    }
+                    tls_data['tls_cipher'] = cipher_map.get(cipher_hex, f'0x{cipher_hex}')
+                
+                offset += 2 + cipher_suite_len
+                
+            if len(payload) > offset + 1:
+                compression_len = payload[offset]
+                offset += 1 + compression_len
+                
+            # Extensions length
+            if len(payload) > offset + 2:
+                ext_len = int.from_bytes(payload[offset:offset+2], 'big')
+                offset += 2
+                ext_end = offset + ext_len
+                
+                # Parse extensions
+                while offset + 4 < ext_end and offset + 4 < len(payload):
+                    ext_type = int.from_bytes(payload[offset:offset+2], 'big')
+                    ext_data_len = int.from_bytes(payload[offset+2:offset+4], 'big')
+                    offset += 4
+                    
+                    # SNI extension type is 0x0000
+                    if ext_type == 0x0000 and offset + ext_data_len <= len(payload):
+                        # Skip list length (2 bytes) and name type (1 byte)
+                        if ext_data_len > 5:
+                            sni_len = int.from_bytes(payload[offset+3:offset+5], 'big')
+                            if offset + 5 + sni_len <= len(payload):
+                                sni_bytes = payload[offset+5:offset+5+sni_len]
+                                tls_data['tls_sni'] = sni_bytes.decode('utf-8', errors='ignore')
+                        break
+                    
+                    offset += ext_data_len
+                    
+        except Exception as e:
+            self.logger.debug(f"TLS parsing error: {e}")
+        
+        return tls_data
+    
+    def _parse_http2_frame(self, payload: bytes) -> int:
+        """Parse HTTP/2 frame to extract stream ID (Layer 5)."""
+        try:
+            # HTTP/2 frame format:
+            # Bytes 0-2: Length (24 bits)
+            # Byte 3: Type
+            # Byte 4: Flags
+            # Bytes 5-8: Stream ID (31 bits, reserved bit is always 0)
+            
+            # HTTP/2 connection preface: "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n"
+            if len(payload) >= 24 and payload[:3] == b'PRI':
+                return 0  # Connection preface, no stream ID
+            
+            # Minimum frame size is 9 bytes (header)
+            if len(payload) < 9:
+                return 0
+            
+            # Check for valid frame type (0x00-0x0A are defined)
+            frame_type = payload[3]
+            if frame_type > 0x0A:
+                return 0
+            
+            # Extract stream ID (bytes 5-8, 31 bits, big-endian)
+            # Reserved bit (bit 0) should be ignored
+            stream_id = int.from_bytes(payload[5:9], 'big') & 0x7FFFFFFF
+            
+            # Stream ID 0 is reserved for connection-level frames
+            # Valid stream IDs are 1-2^31-1
+            if stream_id > 0:
+                return stream_id
+                
+        except Exception as e:
+            self.logger.debug(f"HTTP/2 parsing error: {e}")
+        
+        return 0
     
     def update_statistics_periodic(self):
         """Update statistics periodically"""

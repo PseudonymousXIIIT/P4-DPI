@@ -81,6 +81,10 @@ class DPISystem:
             p4_file = 'p4_programs/dpi_l2_l4.p4'
             p4info_file = 'p4_programs/dpi_l2_l4.p4info.txt'
             json_file = 'p4_programs/dpi_l2_l4.json'
+            # If compiled artifacts already exist, skip compilation to avoid failing when p4c isn't installed
+            if os.path.exists(p4info_file) and os.path.exists(json_file):
+                self.logger.info("P4 artifacts found; skipping compilation")
+                return True
             
             # Check if P4 compiler is available
             result = subprocess.run(['p4c', '--version'], 
@@ -182,6 +186,26 @@ class DPISystem:
         except Exception as e:
             self.logger.error(f"Error starting P4 controller workers: {e}")
             return False
+
+    def perform_initial_ipv4_tests(self):
+        """Run a deterministic set of IPv4 connectivity tests to ensure forwarding tables work."""
+        if not self.topology or not hasattr(self.topology, 'hosts'):
+            self.logger.warning("Topology not ready; skipping initial IPv4 tests")
+            return
+        host_pairs = [
+            ('h1', '10.0.2.1'),
+            ('h2', '10.0.2.2'),
+            ('h5', '10.0.2.2'),
+            ('h3', '10.0.1.1'),
+        ]
+        self.logger.info("Executing initial IPv4 ping tests")
+        for src, dst in host_pairs:
+            h = self.topology.hosts.get(src)
+            if not h:
+                self.logger.warning(f"Host {src} not found for test")
+                continue
+            out = h.cmd(f'ping -c 2 -W 1 {dst}')
+            self.logger.info(f"Ping {src}->{dst} output: {out.strip().splitlines()[-2:] if out else 'NO OUTPUT'}")
     
     def start_packet_logger(self):
         """Start packet logger"""
@@ -201,17 +225,9 @@ class DPISystem:
         self.logger.info("Starting traffic generator...")
         
         try:
-            self.traffic_generator = TrafficGenerator()
-            
-            # Start traffic generation in a separate thread
-            traffic_thread = threading.Thread(
-                target=self.traffic_generator.start_traffic_generation,
-                daemon=True
-            )
-            traffic_thread.start()
-            self.threads.append(traffic_thread)
-            
-            self.logger.info("Traffic generator started")
+            # Traffic generation is now handled by mininet_topology.generate_traffic
+            # to avoid concurrency issues. External traffic generator disabled.
+            self.logger.info("Traffic generation delegated to topology module")
             return True
             
         except Exception as e:
@@ -221,7 +237,6 @@ class DPISystem:
     def start_web_interface(self):
         """Start web interface"""
         self.logger.info("Starting Flask API server...")
-        
         try:
             web_process = subprocess.Popen([
                 'python3', 'scripts/flask_api.py',
@@ -253,6 +268,8 @@ class DPISystem:
         #         self.logger.info("Web interface started")
         #     else:
         #         self.logger.warning("Web interface script not found")
+            # Run initial deterministic IPv4 tests (before traffic generator) to populate packet DB
+            self.perform_initial_ipv4_tests()
             
         #     return True
             
@@ -435,7 +452,7 @@ class DPISystem:
                 print(f"DEBUG: start_system returned True, running={self.running}", flush=True)
                 # Keep running until interrupted
                 while self.running:
-                    pass
+                    time.sleep(0.5)
 
                 print(f"DEBUG: exited run loop, running={self.running}", flush=True)
             else:

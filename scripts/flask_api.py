@@ -103,7 +103,8 @@ class PacketDataProvider:
             cursor.execute("""
                 SELECT * FROM packets 
                 ORDER BY timestamp DESC 
-            """)
+                LIMIT ?
+            """, (limit))
 
             rows = cursor.fetchall()
             conn.close()
@@ -152,7 +153,7 @@ data_provider = PacketDataProvider(DB_PATH)
 @app.route("/api/packets")
 def api_packets():
     offset = int(request.args.get("offset", TIME_OFFSET_SECONDS))
-    limit = int(request.args.get("limit", 100))
+    limit = int(request.args.get("limit", 1000))
     packets = data_provider.get_packets_with_offset(offset, limit)
     return jsonify({"success": True, "count": len(packets), "data": packets})
 

@@ -117,6 +117,69 @@ def _program_s1_routing(logger):
             logger.error(f"[s1] Failed to add ipv4_forward {ip}: {e}")
 
 
+def _program_common_arp(logger, name: str):
+    """Install arp_reply entries for gateway IPs local to each switch to minimize programming load."""
+    ROUTER_MAC = '00:aa:00:00:00:01'
+    if name == 's1':
+        gw_ips = ['10.0.1.254', '10.0.2.254', '10.0.3.254', '10.0.4.254']
+    elif name == 's2':
+        gw_ips = ['10.0.1.254', '10.0.3.254']
+    elif name == 's3':
+        gw_ips = ['10.0.2.254']
+    else:
+        gw_ips = []
+    for ip in gw_ips:
+        try:
+            te = TableEntry('MyIngress.arp_reply')(action='MyIngress.send_arp_reply')
+            te.match['hdr.arp.tpa'] = ip
+            te.action['router_mac'] = ROUTER_MAC
+            te.insert()
+            logger.info(f"[{name}] arp_reply: {ip} -> {ROUTER_MAC}")
+            time.sleep(0.05)
+        except Exception as e:
+            logger.error(f"[{name}] Failed to add arp_reply {ip}: {e}")
+
+
+def _program_edge_routing(logger, name: str):
+    """Install ipv4_forward entries on edge switches (s2, s3). Uses a single router MAC for simplicity."""
+    if name not in ('s2', 's3'):
+        return
+    ROUTER_MAC = '00:aa:00:00:00:01'
+    # Destination IP -> (egress port, host MAC)
+    if name == 's2':
+        host_map = [
+            ('10.0.1.1', 1, '00:00:00:00:00:01'),
+            ('10.0.1.2', 2, '00:00:00:00:00:02'),
+            ('10.0.3.1', 3, '00:00:00:00:00:05'),
+            # Remote networks via uplink (port 4)
+            ('10.0.2.1', 4, '00:00:00:00:00:03'),
+            ('10.0.2.2', 4, '00:00:00:00:00:04'),
+            ('10.0.4.1', 4, '00:00:00:00:00:06'),
+        ]
+    else:  # s3
+        host_map = [
+            ('10.0.2.1', 1, '00:00:00:00:00:03'),
+            ('10.0.2.2', 2, '00:00:00:00:00:04'),
+            # Remote networks via uplink (port 3)
+            ('10.0.1.1', 3, '00:00:00:00:00:01'),
+            ('10.0.1.2', 3, '00:00:00:00:00:02'),
+            ('10.0.3.1', 3, '00:00:00:00:00:05'),
+            ('10.0.4.1', 3, '00:00:00:00:00:06'),
+        ]
+    for ip, port, dst_mac in host_map:
+        try:
+            te = TableEntry('MyIngress.ipv4_forward')(action='MyIngress.set_routing_params')
+            te.match['hdr.ipv4.dstAddr'] = ip
+            te.action['port'] = str(port)
+            te.action['src_mac'] = ROUTER_MAC
+            te.action['dst_mac'] = dst_mac
+            te.insert()
+            logger.info(f"[{name}] ipv4_forward: {ip} -> port {port}, {ROUTER_MAC}->{dst_mac}")
+            time.sleep(0.05)
+        except Exception as e:
+            logger.error(f"[{name}] Failed to add ipv4_forward {ip}: {e}")
+
+
 def connect_and_program(logger, name: str, device_id: int, grpc_port: int, p4info_path: str, json_path: str):
     grpc_addr = f"127.0.0.1:{grpc_port}"
     logger.info(f"[{name}] Connecting to {grpc_addr} device_id={device_id}")
@@ -158,8 +221,11 @@ def connect_and_program(logger, name: str, device_id: int, grpc_port: int, p4inf
         # Program static entries based on switch role
         try:
             _program_mac_forward(logger, name)
+            _program_common_arp(logger, name)
             if name == 's1':
                 _program_s1_routing(logger)
+            else:
+                _program_edge_routing(logger, name)
         except Exception as e:
             logger.error(f"[{name}] Error programming entries: {e}")
         return True
