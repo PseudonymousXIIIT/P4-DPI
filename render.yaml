@@ -1,12 +1,14 @@
 services:
   - type: web
-    name: p4-dpi-api
+    name: p4-dpi
     env: docker
     plan: free
-    dockerfilePath: ./Dockerfile.render
+    dockerfilePath: ./Dockerfile
     envVars:
       - key: PYTHONUNBUFFERED
         value: '1'
+      - key: DPI_TRAFFIC_TARGET_PACKETS
+        value: '600'
     healthCheckPath: /api/health
-    healthCheckTimeout: 30
+    healthCheckTimeout: 60
     autoDeploy: true

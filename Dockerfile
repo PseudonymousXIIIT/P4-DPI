@@ -155,6 +155,12 @@ RUN (git clone --depth 1 https://github.com/p4lang/p4c.git || \
 # Install P4Runtime shell (Python) directly from Git
 RUN pip3 install --no-cache-dir git+https://github.com/p4lang/p4runtime-shell.git
 
+# Install Flask and other Python dependencies for API
+RUN pip3 install --no-cache-dir \
+    flask>=2.0.0 \
+    flask-cors>=3.0.10 \
+    gunicorn>=20.1.0
+
 # Copy project files
 COPY . /p4-dpi/
 
@@ -166,8 +172,30 @@ ENV PYTHONPATH=/usr/local/lib/python3.8/site-packages:$PYTHONPATH
 # Create logs directory
 RUN mkdir -p /p4-dpi/logs
 
-# Expose ports for Mininet and web interface
-EXPOSE 5000 8080 9090
+# Expose ports: 5000 (Flask API), 8080 (Mininet), 9090 (BMv2), 10000 (Gunicorn/Render)
+EXPOSE 5000 8080 9090 10000
 
-# Set default command
-CMD ["/bin/bash"]
+# Set working directory
+WORKDIR /p4-dpi
+
+# Startup script that runs both P4 DPI and Flask API
+RUN echo '#!/bin/bash\n\
+set -e\n\
+echo "Starting P4 DPI system..."\n\
+export DPI_TRAFFIC_TARGET_PACKETS=${DPI_TRAFFIC_TARGET_PACKETS:-600}\n\
+\n\
+# Run P4 DPI in background\n\
+python3 scripts/start_dpi.py --mode start &\n\
+DPI_PID=$!\n\
+\n\
+echo "P4 DPI started (PID: $DPI_PID)"\n\
+sleep 10\n\
+\n\
+# Run Flask API with Gunicorn on dynamic Render port\n\
+echo "Starting Flask API..."\n\
+cd /p4-dpi\n\
+gunicorn --bind 0.0.0.0:${PORT:-5000} --workers 2 --timeout 120 --worker-class sync --access-logfile - --error-logfile - scripts.flask_api:app\n\
+' > /startup.sh && chmod +x /startup.sh
+
+# Use startup script as entrypoint
+CMD ["/startup.sh"]
