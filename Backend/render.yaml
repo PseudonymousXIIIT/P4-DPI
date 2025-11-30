@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: p4-dpi
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.render
+    envVars:
+      - key: PYTHONUNBUFFERED
+        value: '1'
+      - key: DPI_TRAFFIC_TARGET_PACKETS
+        value: '600'
+      - key: BACKEND_SERVICE_URL
+        value: 'https://p4-dpi-backend.onrender.com'
+    healthCheckPath: /api/health
+    autoDeploy: true
