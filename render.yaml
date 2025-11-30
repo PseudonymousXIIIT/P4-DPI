@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: p4-dpi-api
+    env: docker
+    plan: free
+    dockerfilePath: ./Dockerfile.render
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.10
+      - key: DB_PATH
+        value: /data/packets.db
+    healthCheckPath: /api/health
+    autoDeploy: true

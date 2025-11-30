@@ -15,7 +15,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, List
 
-from flask import Flask, jsonify, request, Response, stream_with_context
+from flask import Flask, jsonify, request, Response, stream_with_context, send_from_directory
 from flask_cors import CORS
 
 # ---------------------------------------------------------------
@@ -32,11 +32,16 @@ logger = logging.getLogger("DPI_API")
 # Flask Setup
 # ---------------------------------------------------------------
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='../static', static_url_path='')
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
-DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                       "logs", "packets.db")
+DB_PATH = os.getenv('DB_PATH', os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "logs", "packets.db"
+))
+
+# Ensure logs directory exists
+os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 
 TIME_OFFSET_SECONDS = 60
 
@@ -150,6 +155,37 @@ data_provider = PacketDataProvider(DB_PATH)
 # Flask Endpoints
 # ---------------------------------------------------------------
 
+# Serve React frontend
+@app.route('/')
+def serve_frontend():
+    """Serve the React frontend"""
+    return send_from_directory(app.static_folder, 'index.html')
+
+@app.route('/<path:path>')
+def serve_static_files(path):
+    """Serve static files from React build"""
+    try:
+        return send_from_directory(app.static_folder, path)
+    except:
+        # If file not found, serve index.html (for React routing)
+        return send_from_directory(app.static_folder, 'index.html')
+
+# API Routes
+@app.route("/api/info")
+def api_info():
+    return jsonify({
+        "service": "P4 DPI API",
+        "version": "1.0",
+        "status": "running",
+        "endpoints": [
+            "/api/health",
+            "/api/packets",
+            "/api/stats",
+            "/stream",
+            "/api/upload"
+        ]
+    })
+
 @app.route("/api/packets")
 def api_packets():
     offset = int(request.args.get("offset", TIME_OFFSET_SECONDS))
@@ -171,9 +207,69 @@ def health():
         cur.execute("SELECT COUNT(*) FROM packets")
         count = cur.fetchone()[0]
         conn.close()
-        return jsonify({"status": "healthy", "packet_count": count})
-    except:
-        return jsonify({"status": "unhealthy"}), 500
+        return jsonify({"status": "healthy", "packet_count": count, "db_path": DB_PATH})
+    except Exception as e:
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+
+@app.route('/api/upload', methods=['POST'])
+def upload_packets():
+    """Bulk upload packets from local DPI or sync script"""
+    try:
+        data = request.get_json()
+        packets = data.get('packets', [])
+        
+        if not packets:
+            return jsonify({"success": False, "error": "No packets provided"}), 400
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        inserted = 0
+        for packet in packets:
+            try:
+                cursor.execute("""
+                    INSERT INTO packets (
+                        timestamp, switch_id, src_mac, dst_mac, src_ip, dst_ip,
+                        src_port, dst_port, protocol, packet_size, ttl, tos,
+                        is_suspicious, is_malformed, flow_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    packet.get('timestamp'),
+                    packet.get('switch_id'),
+                    packet.get('src_mac'),
+                    packet.get('dst_mac'),
+                    packet.get('src_ip'),
+                    packet.get('dst_ip'),
+                    packet.get('src_port'),
+                    packet.get('dst_port'),
+                    packet.get('protocol'),
+                    packet.get('packet_size'),
+                    packet.get('ttl'),
+                    packet.get('tos'),
+                    packet.get('is_suspicious', 0),
+                    packet.get('is_malformed', 0),
+                    packet.get('flow_id')
+                ))
+                inserted += 1
+            except Exception as e:
+                logger.warning(f"Failed to insert packet: {e}")
+                continue
+        
+        conn.commit()
+        conn.close()
+        
+        logger.info(f"Uploaded {inserted}/{len(packets)} packets")
+        
+        return jsonify({
+            "success": True,
+            "inserted": inserted,
+            "total": len(packets),
+            "timestamp": datetime.now().isoformat()
+        })
+        
+    except Exception as e:
+        logger.error(f"Upload error: {e}")
+        return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ---------------------------------------------------------------
@@ -285,16 +381,11 @@ def main():
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--host", default="0.0.0.0")
-    parser.add_argument("--port", type=int, default=5000)
+    parser.add_argument("--port", type=int, default=int(os.getenv('PORT', 5000)))
     args = parser.parse_args()
 
-    # Start TCP server
-    # threading.Thread(target=tcp_server, daemon=True).start()
-
-    # Start streaming background loop
-    # threading.Thread(target=stream_loop, daemon=True).start()
-
     logger.info(f"Starting Flask REST API on {args.host}:{args.port}")
+    logger.info(f"Database path: {DB_PATH}")
     app.run(host=args.host, port=args.port)
 
 
