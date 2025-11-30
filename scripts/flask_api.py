@@ -12,6 +12,7 @@ import logging
 import socket
 import threading
 import time
+import requests
 from datetime import datetime, timedelta
 from typing import Dict, List
 
@@ -45,6 +46,12 @@ CORS(app, resources={r"/api/*": {"origins": "*"}})
 logger.info(f"Static folder: {static_folder}")
 logger.info(f"Static folder exists: {os.path.exists(static_folder)}")
 
+# Backend P4 DPI Service Configuration
+# This is the URL of the Render service running the P4 DPI Docker image
+BACKEND_SERVICE_URL = os.getenv('BACKEND_SERVICE_URL', 'http://localhost:5000')
+logger.info(f"Backend P4 DPI Service URL: {BACKEND_SERVICE_URL}")
+
+# Local database path (for fallback/caching if backend is unavailable)
 DB_PATH = os.getenv('DB_PATH', os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "logs", "packets.db"
@@ -56,6 +63,28 @@ logger.info(f"Database path: {DB_PATH}")
 
 TIME_OFFSET_SECONDS = 60
 
+# ---------------------------------------------------------------
+# Backend Service Helper
+# ---------------------------------------------------------------
+
+def get_backend_data(endpoint: str, method: str = 'GET', data: dict = None):
+    """
+    Query the backend P4 DPI service
+    Returns None if backend is unavailable
+    """
+    try:
+        url = f"{BACKEND_SERVICE_URL}/{endpoint}"
+        if method.upper() == 'GET':
+            response = requests.get(url, timeout=5)
+        else:
+            response = requests.post(url, json=data, timeout=5)
+        
+        if response.status_code == 200:
+            return response.json()
+    except Exception as e:
+        logger.warning(f"Backend service unavailable: {e}")
+    
+    return None
 
 # ---------------------------------------------------------------
 # Data Provider
@@ -260,15 +289,34 @@ def api_stats():
 
 @app.route("/api/health")
 def health():
+    """Health check - verifies frontend and backend services"""
+    frontend_status = "healthy"
+    backend_status = "unknown"
+    backend_data = None
+    
+    # Check if we can access the local database
     try:
         conn = data_provider.get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM packets")
         count = cur.fetchone()[0]
         conn.close()
-        return jsonify({"status": "healthy", "packet_count": count, "db_path": DB_PATH})
     except Exception as e:
-        return jsonify({"status": "unhealthy", "error": str(e)}), 500
+        logger.error(f"Local DB error: {e}")
+        frontend_status = "degraded"
+        count = 0
+    
+    # Try to reach backend service
+    backend_data = get_backend_data("api/health")
+    if backend_data:
+        backend_status = backend_data.get("status", "unknown")
+    
+    return jsonify({
+        "status": frontend_status,
+        "frontend": {"status": frontend_status, "packet_count": count},
+        "backend": {"status": backend_status, "url": BACKEND_SERVICE_URL},
+        "db_path": DB_PATH
+    })
 
 @app.route('/api/upload', methods=['POST'])
 def upload_packets():
