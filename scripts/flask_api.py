@@ -160,6 +160,54 @@ class PacketDataProvider:
             return {"total_packets": 0, "forwarded": 0, "dropped": 0, "avg_packet_size": 0}
 
 
+# ---------------------------------------------------------------
+# Database Initialization
+# ---------------------------------------------------------------
+
+def initialize_database():
+    """Initialize database schema if it doesn't exist"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Create packets table if it doesn't exist
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS packets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT,
+                switch_id TEXT,
+                src_mac TEXT,
+                dst_mac TEXT,
+                src_ip TEXT,
+                dst_ip TEXT,
+                src_port INTEGER,
+                dst_port INTEGER,
+                protocol TEXT,
+                packet_size INTEGER,
+                ttl INTEGER,
+                tos INTEGER,
+                flags INTEGER,
+                sequence INTEGER,
+                ack_number INTEGER,
+                window_size INTEGER,
+                link_protocol TEXT,
+                network_protocol TEXT,
+                layer4_protocol TEXT,
+                is_suspicious INTEGER DEFAULT 0,
+                is_malformed INTEGER DEFAULT 0,
+                flow_id TEXT
+            )
+        ''')
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"Database initialized successfully at {DB_PATH}")
+    except Exception as e:
+        logger.error(f"Error initializing database: {e}")
+
+# Initialize database before creating data provider
+initialize_database()
+
 data_provider = PacketDataProvider(DB_PATH)
 
 # ---------------------------------------------------------------

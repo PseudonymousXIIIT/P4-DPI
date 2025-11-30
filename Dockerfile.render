@@ -31,11 +31,5 @@ RUN mkdir -p logs
 # Copy frontend build
 COPY frontend-build/ /app/static/
 
-# Initialize empty database
-RUN python3 -c "import sqlite3; conn=sqlite3.connect('logs/packets.db'); conn.execute('CREATE TABLE IF NOT EXISTS packets (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT, switch_id TEXT, src_mac TEXT, dst_mac TEXT, src_ip TEXT, dst_ip TEXT, src_port INTEGER, dst_port INTEGER, protocol TEXT, packet_size INTEGER, ttl INTEGER, tos INTEGER, flags INTEGER, sequence INTEGER, ack_number INTEGER, window_size INTEGER, link_protocol TEXT, network_protocol TEXT, layer4_protocol TEXT, is_suspicious INTEGER DEFAULT 0, is_malformed INTEGER DEFAULT 0, flow_id TEXT)'); conn.commit(); conn.close()"
-
-# Expose port (Render will set $PORT dynamically)
-EXPOSE 10000
-
 # Run with gunicorn for production
 CMD cd /app && gunicorn --bind 0.0.0.0:${PORT:-10000} --workers 2 --timeout 120 --worker-class sync --access-logfile - --error-logfile - scripts.flask_api:app
