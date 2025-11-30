@@ -32,8 +32,18 @@ logger = logging.getLogger("DPI_API")
 # Flask Setup
 # ---------------------------------------------------------------
 
-app = Flask(__name__, static_folder='../static', static_url_path='')
+# Determine static folder path (handles both local and production)
+import os
+if os.path.exists('/app/static'):
+    static_folder = '/app/static'
+else:
+    static_folder = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'frontend-build')
+
+app = Flask(__name__, static_folder=static_folder, static_url_path='')
 CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+logger.info(f"Static folder: {static_folder}")
+logger.info(f"Static folder exists: {os.path.exists(static_folder)}")
 
 DB_PATH = os.getenv('DB_PATH', os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -42,6 +52,7 @@ DB_PATH = os.getenv('DB_PATH', os.path.join(
 
 # Ensure logs directory exists
 os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+logger.info(f"Database path: {DB_PATH}")
 
 TIME_OFFSET_SECONDS = 60
 

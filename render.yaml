@@ -5,9 +5,8 @@ services:
     plan: free
     dockerfilePath: ./Dockerfile.render
     envVars:
-      - key: PYTHON_VERSION
-        value: 3.10
-      - key: DB_PATH
-        value: /data/packets.db
+      - key: PYTHONUNBUFFERED
+        value: '1'
     healthCheckPath: /api/health
+    healthCheckTimeout: 30
     autoDeploy: true
